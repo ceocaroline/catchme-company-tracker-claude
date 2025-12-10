@@ -6,6 +6,7 @@ from urllib.parse import urlparse
 import time
 import json
 import re
+import itertools
 
 # Configuration
 GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY')
@@ -13,10 +14,8 @@ GOOGLE_CSE_ID = os.environ.get('GOOGLE_CSE_ID')
 BASE_URL = "jobs.ashbyhq.com"
 CSV_FILE = "ashby_companies.csv"
 ZERO_JOBS_FILE = "ashby_zero_jobs.csv"
-FEW_JOBS_FILE = "ashby_few_jobs.csv"  # 1-4 jobs
-
-# Thresholds
-FEW_JOBS_THRESHOLD = 5  # Companies with fewer than this many jobs
+FEW_JOBS_FILE = "ashby_few_jobs.csv"
+FEW_JOBS_THRESHOLD = 5
 
 def get_existing_slugs():
     """Load existing slugs from CSV file"""
@@ -41,18 +40,29 @@ def extract_slug_from_url(url):
     if BASE_URL in parsed.netloc:
         path_parts = parsed.path.strip('/').split('/')
         if path_parts and path_parts[0]:
-            return path_parts[0]
+            # Clean up the slug
+            slug = path_parts[0].lower().strip()
+            # Remove query parameters if any
+            slug = slug.split('?')[0].split('#')[0]
+            return slug if slug else None
     return None
+
+def validate_slug(slug):
+    """Check if a slug exists and returns 200"""
+    try:
+        url = f"https://{BASE_URL}/{slug}"
+        response = requests.head(url, timeout=10, headers={'User-Agent': 'Mozilla/5.0'}, allow_redirects=True)
+        return response.status_code == 200
+    except:
+        return False
 
 def check_job_postings_via_api(slug):
     """Try to get job count via Ashby's API endpoint"""
     try:
-        # Ashby exposes job data through their API
         api_url = f"https://app.ashbyhq.com/api/xml-feed/job-postings/organization/{slug}"
         response = requests.get(api_url, timeout=10, headers={'User-Agent': 'Mozilla/5.0'})
         
         if response.status_code == 200:
-            # Count job entries in XML
             content = response.text
             job_count = content.count('<job>')
             return job_count, "API Success"
@@ -74,7 +84,6 @@ def check_job_postings_via_page(slug):
         
         content = response.text
         
-        # Method 1: Look for explicit "no jobs" messages
         no_jobs_indicators = [
             'no open positions',
             'no positions available',
@@ -89,22 +98,18 @@ def check_job_postings_via_page(slug):
             if indicator in content_lower:
                 return 0, "Page shows no openings message"
         
-        # Method 2: Count job-related HTML elements
         job_count = 0
-        
-        # Common Ashby patterns
         patterns = [
-            r'data-job-id="[^"]*"',  # Job IDs
-            r'class="[^"]*job-posting[^"]*"',  # Job posting elements
-            r'<li[^>]*class="[^"]*ashby-job[^"]*"',  # List items
-            r'role="article"[^>]*data-job',  # Article elements with job data
+            r'data-job-id="[^"]*"',
+            r'class="[^"]*job-posting[^"]*"',
+            r'<li[^>]*class="[^"]*ashby-job[^"]*"',
+            r'role="article"[^>]*data-job',
         ]
         
         for pattern in patterns:
             matches = re.findall(pattern, content, re.IGNORECASE)
             job_count = max(job_count, len(matches))
         
-        # Method 3: Look for structured data (JSON-LD)
         json_ld_pattern = r'<script type="application/ld\+json">(.*?)</script>'
         json_matches = re.findall(json_ld_pattern, content, re.DOTALL)
         
@@ -125,13 +130,11 @@ def check_job_postings_via_page(slug):
 
 def get_job_count(slug):
     """Get job count using multiple methods"""
-    # Try API first (most reliable)
     job_count, status = check_job_postings_via_api(slug)
     
     if job_count is not None:
         return job_count, status
     
-    # Fallback to page scraping
     job_count, status = check_job_postings_via_page(slug)
     return job_count, status
 
@@ -143,15 +146,12 @@ def get_company_name_from_slug(slug):
         if response.status_code == 200:
             content = response.text
             
-            # Try multiple methods to extract company name
-            # Method 1: Page title
             if '<title>' in content:
                 title = content.split('<title>')[1].split('</title>')[0]
                 company_name = title.split(' - ')[0].split(' | ')[0].strip()
                 if company_name and company_name.lower() != 'jobs':
                     return company_name
             
-            # Method 2: Meta tags
             meta_patterns = [
                 r'<meta property="og:site_name" content="([^"]+)"',
                 r'<meta name="application-name" content="([^"]+)"',
@@ -161,7 +161,6 @@ def get_company_name_from_slug(slug):
                 if match:
                     return match.group(1).strip()
             
-            # Fallback: Format slug
             return slug.replace('-', ' ').title()
         else:
             return slug.replace('-', ' ').title()
@@ -187,92 +186,139 @@ def google_custom_search(query, start_index=1):
         print(f"Error querying Google CSE: {e}")
         return None
 
-def discover_slugs_via_google():
-    """Use Google Custom Search to discover all Ashby company slugs"""
-    discovered_slugs = set()
-    query = f"site:{BASE_URL}"
-    
-    print(f"Starting Google Custom Search discovery...")
-    print(f"Query: {query}")
-    
-    start_index = 1
-    total_results_estimate = None
-    
-    while True:
-        print(f"Fetching results starting at index {start_index}...")
-        result = google_custom_search(query, start_index)
-        
-        if not result:
-            print("No results returned. Stopping.")
-            break
-        
-        if total_results_estimate is None and 'searchInformation' in result:
-            total_results_estimate = result['searchInformation'].get('totalResults', 'unknown')
-            print(f"Estimated total results: {total_results_estimate}")
-        
-        if 'items' in result:
-            for item in result['items']:
-                url = item.get('link', '')
-                slug = extract_slug_from_url(url)
-                if slug:
-                    discovered_slugs.add(slug)
-                    print(f"  Found: {slug}")
-        else:
-            print("No more items in results. Stopping.")
-            break
-        
-        if 'queries' in result and 'nextPage' in result['queries']:
-            start_index = result['queries']['nextPage'][0]['startIndex']
-            time.sleep(1)
-        else:
-            print("No more pages available.")
-            break
-        
-        if start_index > 100:
-            print("Reached Google CSE limit for single query (100 results).")
-            break
-    
-    print(f"\nTotal unique slugs discovered via Google: {len(discovered_slugs)}")
-    return discovered_slugs
-
-def discover_slugs_via_alphabet_search():
-    """Search with alphabet prefixes to get more results beyond 100-result limit"""
+def discover_via_google_exhaustive():
+    """Exhaustive Google search with ALL 2-letter combinations"""
     all_slugs = set()
     
-    print("\n=== Starting alphabet-based discovery ===")
+    print("\n" + "="*60)
+    print("METHOD 1: EXHAUSTIVE GOOGLE CUSTOM SEARCH")
+    print("="*60)
     
-    prefixes = [chr(i) for i in range(ord('a'), ord('z')+1)]
-    prefixes.extend([f"{chr(i)}{chr(j)}" for i in range(ord('a'), ord('d')+1) for j in range(ord('a'), ord('z')+1)])
-    prefixes.append('')
+    # Generate ALL possible search prefixes exhaustively
+    prefixes = ['']
     
-    for prefix in prefixes:
+    # Single letters (a-z)
+    prefixes.extend([chr(i) for i in range(ord('a'), ord('z')+1)])
+    
+    # Single digits (0-9)
+    prefixes.extend([str(i) for i in range(10)])
+    
+    # ALL two-letter combinations (26 x 26 = 676)
+    print("Generating all 2-letter combinations...")
+    two_letter = []
+    for c1 in 'abcdefghijklmnopqrstuvwxyz':
+        for c2 in 'abcdefghijklmnopqrstuvwxyz':
+            two_letter.append(c1 + c2)
+    prefixes.extend(two_letter)
+    print(f"Generated {len(two_letter)} two-letter combinations")
+    
+    # Two-letter with numbers (a0, a1... z9)
+    for c1 in 'abcdefghijklmnopqrstuvwxyz':
+        for c2 in '0123456789':
+            prefixes.append(c1 + c2)
+    
+    # Numbers with letters (0a, 1a... 9z)
+    for c1 in '0123456789':
+        for c2 in 'abcdefghijklmnopqrstuvwxyz':
+            prefixes.append(c1 + c2)
+    
+    print(f"Will search with {len(prefixes)} different prefixes (including all 2-letter combos)...")
+    print(f"Estimated time: 30-45 minutes for exhaustive search\n")
+    
+    for i, prefix in enumerate(prefixes):
         query = f"site:{BASE_URL} {prefix}" if prefix else f"site:{BASE_URL}"
-        print(f"\nSearching with prefix: '{prefix}'")
+        
+        if i % 50 == 0:
+            print(f"\nProgress: {i}/{len(prefixes)} prefixes searched")
+            print(f"Unique slugs found so far: {len(all_slugs)}")
         
         start_index = 1
+        page_count = 0
         while start_index <= 100:
             result = google_custom_search(query, start_index)
             
             if not result or 'items' not in result:
                 break
             
+            page_count += 1
+            new_in_batch = 0
             for item in result['items']:
                 url = item.get('link', '')
                 slug = extract_slug_from_url(url)
-                if slug:
-                    if slug not in all_slugs:
-                        all_slugs.add(slug)
-                        print(f"  New slug found: {slug}")
+                if slug and slug not in all_slugs:
+                    all_slugs.add(slug)
+                    new_in_batch += 1
+            
+            if new_in_batch > 0 and page_count == 1:  # Only log first page with results
+                print(f"  '{prefix}': +{new_in_batch} new (total: {len(all_slugs)})")
             
             if 'queries' not in result or 'nextPage' not in result['queries']:
                 break
             
             start_index = result['queries']['nextPage'][0]['startIndex']
-            time.sleep(1)
+            time.sleep(0.5)  # Be nice to the API
     
-    print(f"\n=== Alphabet search complete ===")
-    print(f"Total unique slugs discovered: {len(all_slugs)}")
+    print(f"\n✅ Google Exhaustive Search Complete: {len(all_slugs)} unique slugs")
     return all_slugs
+
+def discover_via_brute_force():
+    """Brute force common company name patterns"""
+    print("\n" + "="*60)
+    print("METHOD 2: BRUTE FORCE VALIDATION")
+    print("="*60)
+    
+    all_slugs = set()
+    
+    # Common company name patterns and words to test
+    words = [
+        'ai', 'app', 'tech', 'labs', 'data', 'cloud', 'soft', 'ware', 'systems',
+        'solutions', 'group', 'digital', 'ventures', 'partners', 'capital',
+        'health', 'care', 'medical', 'bio', 'pharma', 'finance', 'pay', 'bank',
+        'crypto', 'web', 'net', 'media', 'games', 'studio', 'works', 'labs',
+        'inc', 'corp', 'company', 'co', 'io', 'hq', 'base', 'hub', 'space'
+    ]
+    
+    # Generate combinations
+    slugs_to_test = set()
+    
+    # Single words
+    slugs_to_test.update(words)
+    
+    # Two-word combinations (limited to avoid explosion)
+    for w1, w2 in itertools.combinations(words[:20], 2):
+        slugs_to_test.add(f"{w1}{w2}")
+        slugs_to_test.add(f"{w1}-{w2}")
+    
+    print(f"Testing {len(slugs_to_test)} potential slug patterns...")
+    
+    tested = 0
+    found = 0
+    
+    for slug in slugs_to_test:
+        tested += 1
+        
+        if tested % 100 == 0:
+            print(f"  Tested {tested}/{len(slugs_to_test)}, Found: {found}")
+        
+        if validate_slug(slug):
+            all_slugs.add(slug)
+            found += 1
+            print(f"  ✓ Found: {slug}")
+        
+        time.sleep(0.1)  # Be nice to the server
+    
+    print(f"\n✅ Brute Force Complete: {found} valid slugs found")
+    return all_slugs
+
+def discover_via_specific_searches():
+    """Targeted search method - currently disabled for validation testing"""
+    print("\n" + "="*60)
+    print("METHOD 3: TARGETED SEARCH")
+    print("="*60)
+    print("Skipped - allows validation that Methods 1 & 2 find everything organically")
+    print("✅ Complete: 0 slugs (method intentionally disabled)")
+    
+    return set()
 
 def save_to_csv(slugs_dict):
     """Save slugs dictionary to CSV file"""
@@ -309,7 +355,6 @@ def save_filtered_lists(slugs_dict):
         except:
             pass
     
-    # Save zero jobs list
     if zero_jobs:
         with open(ZERO_JOBS_FILE, 'w', newline='', encoding='utf-8') as f:
             fieldnames = ['slug', 'company_name', 'first_seen_date', 'job_count', 'url']
@@ -329,7 +374,6 @@ def save_filtered_lists(slugs_dict):
         
         print(f"\n🆕 Saved {len(zero_jobs)} companies with ZERO jobs to {ZERO_JOBS_FILE}")
     
-    # Save few jobs list (1-4 jobs)
     if few_jobs:
         with open(FEW_JOBS_FILE, 'w', newline='', encoding='utf-8') as f:
             fieldnames = ['slug', 'company_name', 'first_seen_date', 'job_count', 'url']
@@ -350,31 +394,41 @@ def save_filtered_lists(slugs_dict):
         print(f"\n🔥 Saved {len(few_jobs)} companies with 1-{FEW_JOBS_THRESHOLD-1} jobs to {FEW_JOBS_FILE}")
 
 def main():
-    print("=" * 60)
-    print("ASHBY COMPANY SLUG DISCOVERY TOOL")
-    print(f"Flagging companies with fewer than {FEW_JOBS_THRESHOLD} jobs")
-    print("=" * 60)
+    print("="*60)
+    print("ASHBY AGGRESSIVE DISCOVERY TOOL")
+    print("3-Method Exhaustive Search (No DataForSEO)")
+    print("="*60)
     
     existing_slugs = get_existing_slugs()
     print(f"\nExisting companies in database: {len(existing_slugs)}")
     
-    discovered_slugs = set()
-    discovered_slugs.update(discover_slugs_via_google())
-    discovered_slugs.update(discover_slugs_via_alphabet_search())
+    # Run all discovery methods
+    all_discovered = set()
     
-    print(f"\n{'='*60}")
-    print(f"DISCOVERY SUMMARY")
-    print(f"{'='*60}")
-    print(f"Total unique slugs discovered: {len(discovered_slugs)}")
+    # Method 1: Exhaustive Google Search (ALL 2-letter combos)
+    all_discovered.update(discover_via_google_exhaustive())
+    
+    # Method 2: Brute Force
+    all_discovered.update(discover_via_brute_force())
+    
+    # Method 3: Targeted Search (empty for validation)
+    all_discovered.update(discover_via_specific_searches())
+    
+    print(f"\n" + "="*60)
+    print(f"COMBINED DISCOVERY RESULTS")
+    print("="*60)
+    print(f"Total unique slugs discovered: {len(all_discovered)}")
     print(f"Existing slugs in database: {len(existing_slugs)}")
     
-    new_slugs = discovered_slugs - set(existing_slugs.keys())
+    new_slugs = all_discovered - set(existing_slugs.keys())
     print(f"New slugs to add: {len(new_slugs)}")
     
     if new_slugs:
-        print(f"\n🆕 NEW COMPANIES DISCOVERED:")
-        for slug in sorted(new_slugs):
+        print(f"\n🆕 NEW COMPANIES DISCOVERED ({len(new_slugs)}):")
+        for slug in sorted(list(new_slugs)[:50]):  # Show first 50
             print(f"  - {slug}")
+        if len(new_slugs) > 50:
+            print(f"  ... and {len(new_slugs) - 50} more")
     
     today = datetime.now().strftime('%Y-%m-%d')
     
@@ -392,7 +446,6 @@ def main():
             
             print(f"  Company: {company_name}")
             print(f"  Job count: {job_count}")
-            print(f"  Status: {status}")
             
             existing_slugs[slug] = {
                 'company_name': company_name,
@@ -401,7 +454,7 @@ def main():
                 'job_count': str(job_count)
             }
             
-            time.sleep(0.5)
+            time.sleep(0.3)
     
     # Update last_checked_date for all slugs
     for slug in existing_slugs:
@@ -430,10 +483,9 @@ def main():
     print(f"  1-{FEW_JOBS_THRESHOLD-1} jobs (very new!): {few_count}")
     print(f"  {FEW_JOBS_THRESHOLD}+ jobs (established): {many_count}")
     
-    print(f"\n📁 FILES CREATED:")
-    print(f"  {CSV_FILE} - All companies")
-    print(f"  {ZERO_JOBS_FILE} - Companies with 0 jobs")
-    print(f"  {FEW_JOBS_FILE} - Companies with 1-{FEW_JOBS_THRESHOLD-1} jobs")
+    print(f"\n🧪 VALIDATION TEST:")
+    print(f"  Check if 'cyvl' is in the list: {'YES ✓' if 'cyvl' in existing_slugs else 'NO ✗'}")
+    print(f"  Check if 'hyphametrics' is in the list: {'YES ✓' if 'hyphametrics' in existing_slugs else 'NO ✗'}")
 
 if __name__ == "__main__":
     main()
