@@ -32,7 +32,7 @@ jobs:
         GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
         GOOGLE_CSE_ID: ${{ secrets.GOOGLE_CSE_ID }}
       run: |
-        python ashby_diagnostic.py
+        ashby_slug_discovery.py
     
     - name: Commit and push changes
       run: |
