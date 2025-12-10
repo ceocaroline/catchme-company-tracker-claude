@@ -394,13 +394,16 @@ def save_filtered_lists(slugs_dict):
         print(f"\n🔥 Saved {len(few_jobs)} companies with 1-{FEW_JOBS_THRESHOLD-1} jobs to {FEW_JOBS_FILE}")
 
 def main():
-    print("="*60)
-    print("ASHBY AGGRESSIVE DISCOVERY TOOL")
-    print("3-Method Exhaustive Search (No DataForSEO)")
-    print("="*60)
+    print("="*60, flush=True)
+    print("ASHBY AGGRESSIVE DISCOVERY TOOL", flush=True)
+    print("3-Method Exhaustive Search (No DataForSEO)", flush=True)
+    print("="*60, flush=True)
+    print("\n🚀 Script started successfully!", flush=True)
+    print(f"Current time: {datetime.now()}", flush=True)
     
+    print("\n📁 Loading existing data...", flush=True)
     existing_slugs = get_existing_slugs()
-    print(f"\nExisting companies in database: {len(existing_slugs)}")
+    print(f"✅ Loaded {len(existing_slugs)} existing companies", flush=True)
     
     # Run all discovery methods
     all_discovered = set()
