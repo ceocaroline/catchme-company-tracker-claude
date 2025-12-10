@@ -88,7 +88,7 @@ def search_with_prefix(prefix, all_slugs):
             break
         
         start_index = result['queries']['nextPage'][0]['startIndex']
-        time.sleep(0.5)
+        time.sleep(1.5)  # Increased to avoid rate limiting
     
     return new_count
 
@@ -122,7 +122,9 @@ def discover_via_google_chunked():
             prefixes.append(c1 + c2)
     
     print(f"Generated {len(prefixes)} prefixes", flush=True)
-    print(f"Processing in batches of {BATCH_SIZE}...\n", flush=True)
+    print(f"Processing in batches of {BATCH_SIZE}...", flush=True)
+    print(f"⚠️  Using 1.5s delays to avoid rate limiting", flush=True)
+    print(f"⏱️  Estimated time: 60-90 minutes for complete run\n", flush=True)
     
     # Process in batches
     total_batches = (len(prefixes) + BATCH_SIZE - 1) // BATCH_SIZE
