@@ -6,7 +6,6 @@ from urllib.parse import urlparse
 import time
 import json
 import re
-import itertools
 
 # Configuration
 GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY')
@@ -16,7 +15,7 @@ CSV_FILE = "ashby_companies.csv"
 ZERO_JOBS_FILE = "ashby_zero_jobs.csv"
 FEW_JOBS_FILE = "ashby_few_jobs.csv"
 FEW_JOBS_THRESHOLD = 5
-BATCH_SIZE = 100  # Process prefixes in batches to avoid hanging
+BATCH_SIZE = 100
 
 def get_existing_slugs():
     """Load existing slugs from CSV file"""
@@ -28,11 +27,11 @@ def get_existing_slugs():
                 existing_slugs[row['slug']] = {
                     'company_name': row['company_name'],
                     'first_seen_date': row['first_seen_date'],
-                    'last_checked_date': row['last_checked_date'],
+                    'last_checked_date': row.get('last_checked_date', row['first_seen_date']),
                     'job_count': row.get('job_count', '0')
                 }
     except FileNotFoundError:
-        print(f"No existing CSV found. Creating new file: {CSV_FILE}", flush=True)
+        print(f"No existing CSV found. Starting fresh!", flush=True)
     return existing_slugs
 
 def extract_slug_from_url(url):
@@ -65,13 +64,14 @@ def google_custom_search(query, start_index=1):
         print(f"  ⚠ API error: {str(e)[:100]}", flush=True)
         return None
 
-def search_with_prefix(prefix, all_slugs):
+def search_with_prefix(prefix, all_slugs, found_this_run):
     """Search Google with a single prefix and return new slugs found"""
     query = f"site:{BASE_URL} {prefix}" if prefix else f"site:{BASE_URL}"
     new_count = 0
+    new_slugs_list = []
     
     start_index = 1
-    while start_index <= 100:  # Max 100 results per query
+    while start_index <= 100:
         result = google_custom_search(query, start_index)
         
         if not result or 'items' not in result:
@@ -82,41 +82,40 @@ def search_with_prefix(prefix, all_slugs):
             slug = extract_slug_from_url(url)
             if slug and slug not in all_slugs:
                 all_slugs.add(slug)
+                found_this_run.add(slug)
                 new_count += 1
+                new_slugs_list.append(slug)
         
         if 'queries' not in result or 'nextPage' not in result['queries']:
             break
         
         start_index = result['queries']['nextPage'][0]['startIndex']
-        time.sleep(1.5)  # Increased to avoid rate limiting
+        time.sleep(1.5)  # Rate limiting
     
-    return new_count
+    return new_count, new_slugs_list
 
 def discover_via_google_chunked():
-    """Exhaustive Google search in manageable chunks"""
+    """Exhaustive Google search in manageable chunks with full logging"""
     all_slugs = set()
+    found_this_run = set()
     
     print("\n" + "="*60, flush=True)
-    print("METHOD 1: EXHAUSTIVE GOOGLE SEARCH (CHUNKED)", flush=True)
+    print("METHOD 1: EXHAUSTIVE GOOGLE SEARCH", flush=True)
     print("="*60, flush=True)
     
-    # Generate all prefixes
     print("Generating search prefixes...", flush=True)
     prefixes = ['']
     prefixes.extend([chr(i) for i in range(ord('a'), ord('z')+1)])
     prefixes.extend([str(i) for i in range(10)])
     
-    # All two-letter combinations
     for c1 in 'abcdefghijklmnopqrstuvwxyz':
         for c2 in 'abcdefghijklmnopqrstuvwxyz':
             prefixes.append(c1 + c2)
     
-    # Letter + digit
     for c1 in 'abcdefghijklmnopqrstuvwxyz':
         for c2 in '0123456789':
             prefixes.append(c1 + c2)
     
-    # Digit + letter
     for c1 in '0123456789':
         for c2 in 'abcdefghijklmnopqrstuvwxyz':
             prefixes.append(c1 + c2)
@@ -124,9 +123,8 @@ def discover_via_google_chunked():
     print(f"Generated {len(prefixes)} prefixes", flush=True)
     print(f"Processing in batches of {BATCH_SIZE}...", flush=True)
     print(f"⚠️  Using 1.5s delays to avoid rate limiting", flush=True)
-    print(f"⏱️  Estimated time: 60-90 minutes for complete run\n", flush=True)
+    print(f"⏱️  Estimated time: 60-90 minutes\n", flush=True)
     
-    # Process in batches
     total_batches = (len(prefixes) + BATCH_SIZE - 1) // BATCH_SIZE
     
     for batch_num in range(total_batches):
@@ -141,28 +139,26 @@ def discover_via_google_chunked():
         batch_start_time = time.time()
         
         for i, prefix in enumerate(batch):
-            new_found = search_with_prefix(prefix, all_slugs)
+            new_found, new_slugs_list = search_with_prefix(prefix, all_slugs, found_this_run)
             
-            # Print every 10th in the batch
-            if i % 10 == 0 or new_found > 0:
-                display_prefix = prefix if prefix else '(empty)'
+            display_prefix = prefix if prefix else '(empty)'
+            
+            # Always print the search, show slugs if any found
+            if new_found > 0:
                 print(f"    [{start_idx + i}] '{display_prefix}': +{new_found} (total: {len(all_slugs)})", flush=True)
+                # Print each new slug found
+                for slug in new_slugs_list:
+                    print(f"        → {slug}", flush=True)
+            elif i % 10 == 0:
+                # Still print every 10th even if nothing found
+                print(f"    [{start_idx + i}] '{display_prefix}': +0 (total: {len(all_slugs)})", flush=True)
         
         batch_time = time.time() - batch_start_time
         print(f"  Batch completed in {batch_time:.1f}s", flush=True)
         print(f"  Total unique slugs so far: {len(all_slugs)}\n", flush=True)
     
     print(f"✅ Google Search Complete: {len(all_slugs)} unique slugs", flush=True)
-    return all_slugs
-
-def validate_slug(slug):
-    """Check if a slug exists"""
-    try:
-        url = f"https://{BASE_URL}/{slug}"
-        response = requests.head(url, timeout=10, headers={'User-Agent': 'Mozilla/5.0'}, allow_redirects=True)
-        return response.status_code == 200
-    except:
-        return False
+    return all_slugs, found_this_run
 
 def check_job_postings_via_api(slug):
     """Get job count via Ashby's API"""
@@ -243,13 +239,14 @@ def get_company_name_from_slug(slug):
     except:
         return slug.replace('-', ' ').title()
 
-def save_to_csv(slugs_dict):
-    """Save to CSV"""
+def save_to_csv(slugs_dict, new_this_run):
+    """Save ALL companies to CSV with new_this_run flag"""
     with open(CSV_FILE, 'w', newline='', encoding='utf-8') as f:
-        fieldnames = ['slug', 'company_name', 'first_seen_date', 'last_checked_date', 'job_count']
+        fieldnames = ['slug', 'company_name', 'first_seen_date', 'last_checked_date', 'job_count', 'new_this_run']
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         
+        # Sort by first_seen_date (newest first)
         sorted_slugs = sorted(slugs_dict.items(), key=lambda x: x[1]['first_seen_date'], reverse=True)
         
         for slug, data in sorted_slugs:
@@ -258,10 +255,12 @@ def save_to_csv(slugs_dict):
                 'company_name': data['company_name'],
                 'first_seen_date': data['first_seen_date'],
                 'last_checked_date': data['last_checked_date'],
-                'job_count': data.get('job_count', '0')
+                'job_count': data.get('job_count', '0'),
+                'new_this_run': 'YES' if slug in new_this_run else 'NO'
             })
     
-    print(f"\n✅ Saved {len(slugs_dict)} companies to {CSV_FILE}", flush=True)
+    print(f"\n✅ Saved ALL {len(slugs_dict)} companies to {CSV_FILE}", flush=True)
+    print(f"   ({len(new_this_run)} marked as NEW this run)", flush=True)
 
 def save_filtered_lists(slugs_dict):
     """Save filtered lists by job count"""
@@ -297,33 +296,33 @@ def save_filtered_lists(slugs_dict):
 
 def main():
     print("="*60, flush=True)
-    print("ASHBY COMPANY DISCOVERY - CHUNKED VERSION", flush=True)
+    print("ASHBY COMPANY DISCOVERY - FULL LOGGING", flush=True)
     print("="*60, flush=True)
     print(f"Started: {datetime.now()}", flush=True)
     
     existing_slugs = get_existing_slugs()
     print(f"Loaded {len(existing_slugs)} existing companies\n", flush=True)
     
-    # Discovery
-    all_discovered = discover_via_google_chunked()
+    # Discovery with full logging
+    all_discovered, found_this_run = discover_via_google_chunked()
     
     print(f"\n" + "="*60, flush=True)
     print("DISCOVERY COMPLETE", flush=True)
     print("="*60, flush=True)
-    print(f"Total unique slugs: {len(all_discovered)}", flush=True)
-    print(f"Existing in database: {len(existing_slugs)}", flush=True)
+    print(f"Total discovered this run: {len(all_discovered)}", flush=True)
+    print(f"Previously in database: {len(existing_slugs)}", flush=True)
     
     new_slugs = all_discovered - set(existing_slugs.keys())
-    print(f"New companies found: {len(new_slugs)}\n", flush=True)
+    print(f"Brand new companies: {len(new_slugs)}\n", flush=True)
     
     if new_slugs:
         print(f"NEW COMPANIES ({len(new_slugs)}):", flush=True)
-        for slug in sorted(list(new_slugs)[:20]):
-            print(f"  - {slug}", flush=True)
-        if len(new_slugs) > 20:
-            print(f"  ... and {len(new_slugs) - 20} more", flush=True)
+        for slug in sorted(list(new_slugs)[:30]):
+            print(f"  ✓ {slug}", flush=True)
+        if len(new_slugs) > 30:
+            print(f"  ... and {len(new_slugs) - 30} more", flush=True)
     
-    # Process new companies
+    # Process new companies for job counts
     today = datetime.now().strftime('%Y-%m-%d')
     
     if new_slugs:
@@ -332,13 +331,13 @@ def main():
         print("="*60, flush=True)
         
         for i, slug in enumerate(new_slugs, 1):
-            if i % 10 == 1:  # Progress every 10
+            if i % 10 == 1:
                 print(f"\nProcessing {i}-{min(i+9, len(new_slugs))} of {len(new_slugs)}...", flush=True)
             
             company_name = get_company_name_from_slug(slug)
             job_count, status = get_job_count(slug)
             
-            print(f"  {slug}: {job_count} jobs", flush=True)
+            print(f"  {slug}: {company_name} ({job_count} jobs)", flush=True)
             
             existing_slugs[slug] = {
                 'company_name': company_name,
@@ -348,13 +347,12 @@ def main():
             }
             time.sleep(0.3)
     
-    # Update dates
+    # Update last_checked_date for all
     for slug in existing_slugs:
-        if slug not in new_slugs:
-            existing_slugs[slug]['last_checked_date'] = today
+        existing_slugs[slug]['last_checked_date'] = today
     
-    # Save
-    save_to_csv(existing_slugs)
+    # Save everything
+    save_to_csv(existing_slugs, new_slugs)
     save_filtered_lists(existing_slugs)
     
     # Stats
@@ -367,15 +365,16 @@ def main():
     print(f"\n" + "="*60, flush=True)
     print("FINAL RESULTS", flush=True)
     print("="*60, flush=True)
-    print(f"Total companies: {len(existing_slugs)}", flush=True)
-    print(f"New today: {len(new_slugs)}", flush=True)
+    print(f"Total companies in CSV: {len(existing_slugs)}", flush=True)
+    print(f"New this run: {len(new_slugs)}", flush=True)
     print(f"\nJob counts:", flush=True)
     print(f"  0 jobs: {zero}", flush=True)
     print(f"  1-{FEW_JOBS_THRESHOLD-1} jobs: {few}", flush=True)
     print(f"  {FEW_JOBS_THRESHOLD}+ jobs: {many}", flush=True)
-    print(f"\n🧪 VALIDATION:", flush=True)
-    print(f"  cyvl found: {'YES ✓' if 'cyvl' in existing_slugs else 'NO ✗'}", flush=True)
-    print(f"  hyphametrics found: {'YES ✓' if 'hyphametrics' in existing_slugs else 'NO ✗'}", flush=True)
+    print(f"\n🧪 VALIDATION CHECK:", flush=True)
+    print(f"  cyvl in database: {'YES ✓' if 'cyvl' in existing_slugs else 'NO ✗'}", flush=True)
+    print(f"  hyphametrics in database: {'YES ✓' if 'hyphametrics' in existing_slugs else 'NO ✗'}", flush=True)
+    print(f"\n💡 TIP: Filter CSV by 'new_this_run=YES' to see only new companies!", flush=True)
 
 if __name__ == "__main__":
     main()
