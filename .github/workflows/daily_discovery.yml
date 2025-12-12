@@ -1,10 +1,10 @@
-name: Daily Ashby Slug Discovery
+name: Weekly Ashby Slug Discovery
 
 on:
   schedule:
     # Runs at 6:00 AM ET (11:00 AM UTC during EST, 10:00 AM UTC during EDT)
     # Using 11:00 AM UTC for winter (EST)
-    - cron: '0 11 * * *'
+    - cron: '0 11 * * 1'
   workflow_dispatch:  # Allows manual triggering
 
 jobs:
